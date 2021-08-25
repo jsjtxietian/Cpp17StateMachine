@@ -1,24 +1,135 @@
-#include <iostream>
 #include <tuple>
 #include <variant>
-#include <functional>
+#include <iostream>
+#include <utility>
+
+template <typename... Handlers>
+struct Will : Handlers...
+{
+    using Handlers::handle...;
+};
+
+struct Nothing
+{
+    template <typename Machine, typename State, typename Event>
+    void execute(Machine &, State &, const Event &)
+    {
+    }
+};
+
+template <typename Action>
+struct ByDefault
+{
+    template <typename Event>
+    Action handle(const Event &) const
+    {
+        return Action{};
+    }
+};
+
+template <typename... Actions>
+class OneOf
+{
+public:
+    template <typename T>
+    OneOf(T &&arg)
+        : options(std::forward<T>(arg))
+    {
+    }
+
+    template <typename Machine, typename State, typename Event>
+    void execute(Machine &machine, State &state, const Event &event)
+    {
+        std::visit([&machine, &state, &event](auto &action)
+                   { action.execute(machine, state, event); },
+                   options);
+    }
+
+private:
+    std::variant<Actions...> options;
+};
+
+template <typename Action>
+struct Maybe : public OneOf<Action, Nothing>
+{
+    using OneOf<Action, Nothing>::OneOf;
+};
+
+template <typename Event, typename Action>
+struct On
+{
+    Action handle(const Event &) const
+    {
+        return Action{};
+    }
+};
+
+template <typename TargetState>
+class TransitionTo
+{
+public:
+    template <typename Machine, typename State, typename Event>
+    void execute(Machine &machine, State &prevState, const Event &event)
+    {
+        leave(prevState, event);
+        TargetState &newState = machine.template transitionTo<TargetState>();
+        enter(newState, event);
+    }
+
+private:
+    void leave(...)
+    {
+    }
+
+    template <typename State, typename Event>
+    auto leave(State &state, const Event &event) -> decltype(state.onLeave(event))
+    {
+        return state.onLeave(event);
+    }
+
+    void enter(...)
+    {
+    }
+
+    template <typename State, typename Event>
+    auto enter(State &state, const Event &event) -> decltype(state.onEnter(event))
+    {
+        return state.onEnter(event);
+    }
+};
 
 template <typename... States>
 class StateMachine
 {
 public:
-    template <typename State>
-    void transitionTo()
+    StateMachine() = default;
+
+    StateMachine(States... states)
+        : states(std::move(states)...)
     {
-        currentState = &std::get<State>(states);
+    }
+
+    template <typename State>
+    State &transitionTo()
+    {
+        State &state = std::get<State>(states);
+        currentState = &state;
+        return state;
     }
 
     template <typename Event>
     void handle(const Event &event)
     {
-        auto passEventToState = [this, &event](auto statePtr)
+        handleBy(event, *this);
+    }
+
+    template <typename Event, typename Machine>
+    void handleBy(const Event &event, Machine &machine)
+    {
+        auto passEventToState = [&machine, &event](auto statePtr)
         {
-            statePtr->handle(event).execute(*this);
+            auto action = statePtr->handle(event);
+            action.execute(machine, *statePtr, event);
         };
         std::visit(passEventToState, currentState);
     }
@@ -26,24 +137,6 @@ public:
 private:
     std::tuple<States...> states;
     std::variant<States *...> currentState{&std::get<0>(states)};
-};
-
-template <typename State>
-struct TransitionTo
-{
-    template <typename Machine>
-    void execute(Machine &machine)
-    {
-        machine.template transitionTo<State>();
-    }
-};
-
-struct Nothing
-{
-    template <typename Machine>
-    void execute(Machine &)
-    {
-    }
 };
 
 struct OpenEvent
@@ -54,50 +147,70 @@ struct CloseEvent
 {
 };
 
+struct LockEvent
+{
+    uint32_t newKey;
+};
+
+struct UnlockEvent
+{
+    uint32_t key;
+};
+
 struct ClosedState;
 struct OpenState;
+class LockedState;
 
-struct ClosedState
+struct ClosedState : public Will<ByDefault<Nothing>,
+                                 On<LockEvent, TransitionTo<LockedState>>,
+                                 On<OpenEvent, TransitionTo<OpenState>>>
 {
-    TransitionTo<OpenState> handle(const OpenEvent &) const
-    {
-        std::cout << "Opening the door..." << std::endl;
-        return {};
-    }
-
-    Nothing handle(const CloseEvent &) const
-    {
-        std::cout << "Cannot close. The door is already closed!" << std::endl;
-        return {};
-    }
 };
 
-struct OpenState
+struct OpenState : public Will<ByDefault<Nothing>,
+                               On<CloseEvent, TransitionTo<ClosedState>>>
 {
-    Nothing handle(const OpenEvent &) const
-    {
-        std::cout << "Cannot open. The door is already open!" << std::endl;
-        return {};
-    }
-
-    TransitionTo<ClosedState> handle(const CloseEvent &) const
-    {
-        std::cout << "Closing the door..." << std::endl;
-        return {};
-    }
 };
 
-using Door = StateMachine<ClosedState, OpenState>;
+class LockedState : public ByDefault<Nothing>
+{
+public:
+    using ByDefault::handle;
+
+    LockedState(uint32_t key)
+        : key(key)
+    {
+    }
+
+    void onEnter(const LockEvent &e)
+    {
+        key = e.newKey;
+    }
+
+    Maybe<TransitionTo<ClosedState>> handle(const UnlockEvent &e)
+    {
+        if (e.key == key)
+        {
+            std::cout << "Unlock Succeed!" << std::endl;
+            return TransitionTo<ClosedState>{};
+        }
+        std::cout << "Unlock Failed!" << std::endl;
+
+        return Nothing{};
+    }
+
+private:
+    uint32_t key;
+};
+
+using Door = StateMachine<ClosedState, OpenState, LockedState>;
 
 int main()
 {
-    Door door;
+    Door door{ClosedState{}, OpenState{}, LockedState{0}};
 
-    door.handle(OpenEvent{});
-    door.handle(CloseEvent{});
-
-    door.handle(CloseEvent{});
-    door.handle(OpenEvent{});
-
+    door.handle(LockEvent{1234});
+    door.handle(UnlockEvent{2});
+    door.handle(UnlockEvent{1234});
     return 0;
 }
