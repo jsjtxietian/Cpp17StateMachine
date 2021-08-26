@@ -1,10 +1,10 @@
 #pragma once
 
-#include <array>
 #include <string>
 #include <cstdlib>
 #include <iostream>
-#include <cstdio>
+#include <array>
+#include <type_traits>
 
 template <typename T, std::size_t N, std::size_t... Idx>
 constexpr std::array<T, N> toStdArray(T (&arr)[N], std::index_sequence<Idx...>)
@@ -31,16 +31,15 @@ constexpr std::array<T, LeftSize + RightSize> join(const std::array<T, LeftSize>
 }
 
 template <std::size_t NewSize, typename T, std::size_t OldSize, std::size_t... Indexes>
-constexpr std::array<T, NewSize> resize(const std::array<T, OldSize> &arr, std::index_sequence<Indexes...>)
+constexpr std::array<T, NewSize> resize(const std::array<T, OldSize> &arr, std::remove_const_t<T> defaultValue, std::index_sequence<Indexes...>)
 {
-    return {arr[Indexes]...};
+    return {((Indexes < OldSize) ? arr[Indexes] : defaultValue)...};
 }
 
 template <std::size_t NewSize, typename T, std::size_t OldSize>
-constexpr std::array<T, NewSize> resize(const std::array<T, OldSize> &arr)
+constexpr std::array<T, NewSize> resize(const std::array<T, OldSize> &arr, std::remove_const_t<T> defaultValue)
 {
-    constexpr std::size_t minSize = std::min(OldSize, NewSize);
-    return resize<NewSize>(arr, std::make_index_sequence<minSize>());
+    return resize<NewSize>(arr, defaultValue, std::make_index_sequence<NewSize>());
 }
 
 template <typename T, std::size_t N, std::size_t... Idx>
@@ -72,12 +71,24 @@ public:
     template <std::size_t M>
     constexpr StaticString<N + M - 1> operator+(const StaticString<M> &rhs) const
     {
-        return join(resize<N - 1>(chars), rhs.chars);
+        return join(resize<N - 1>(chars, '\0'), rhs.chars);
     }
 
     constexpr bool operator==(const StaticString<N> &rhs) const
     {
         return areEqual(chars, rhs.chars);
+    }
+
+    constexpr std::size_t length() const
+    {
+        return N - 1;
+    }
+
+    template <std::size_t TargetLen>
+    constexpr StaticString<TargetLen + 1> changeLength(char fill) const
+    {
+        constexpr std::array<const char, 1> stringEnd{'\0'};
+        return join(resize<TargetLen>(resize<N - 1>(chars, fill), fill), stringEnd);
     }
 
     template <std::size_t M>
@@ -96,15 +107,6 @@ namespace tests
 {
     namespace
     {
-
-        [[maybe_unused]] constexpr void testAdding()
-        {
-            constexpr StaticString lhs{"abc"};
-            constexpr StaticString rhs{"de"};
-            constexpr StaticString expected{"abcde"};
-            static_assert(expected == lhs + rhs);
-        }
-
         [[maybe_unused]] constexpr void testToStdArray()
         {
             constexpr int input[] = {1, 2, 3};
@@ -125,25 +127,52 @@ namespace tests
         {
             constexpr std::array input = {1, 2, 3};
             constexpr std::array expectedShorter = {1, 2};
-            constexpr std::array expectedLonger = {1, 2, 3, 0};
-            static_assert(areEqual(expectedShorter, resize<2>(input)));
-            static_assert(areEqual(expectedLonger, resize<4>(input)));
+            constexpr std::array expectedLonger = {1, 2, 3, 9};
+            static_assert(areEqual(expectedShorter, resize<2>(input, 9)));
+            static_assert(areEqual(expectedLonger, resize<4>(input, 9)));
+        }
+
+        [[maybe_unused]] constexpr void testAdding()
+        {
+            constexpr StaticString lhs{"abc"};
+            constexpr StaticString rhs{"de"};
+            constexpr StaticString expected{"abcde"};
+            static_assert(expected == lhs + rhs);
+        }
+
+        [[maybe_unused]] constexpr void testLength()
+        {
+            constexpr StaticString lhs{"abc"};
+            constexpr size_t expected{3};
+            static_assert(lhs.length() == expected);
+        }
+
+        [[maybe_unused]] constexpr void test0Length()
+        {
+            constexpr StaticString lhs{""};
+            constexpr size_t expected{0};
+            static_assert(lhs.length() == expected);
+        }
+
+        [[maybe_unused]] constexpr void testChangeLength()
+        {
+            constexpr StaticString shorter{"abc"};
+            constexpr StaticString longer{"abcdef"};
+            constexpr StaticString empty{""};
+
+            constexpr size_t minLength{5};
+            constexpr StaticString expectedShorter{"abcxx"};
+            constexpr StaticString expectedLonger{"abcde"};
+            constexpr StaticString expectedEmpty{"zzzzz"};
+
+            constexpr auto res = shorter.changeLength<minLength>('x');
+
+            static_assert(res.data()[3] == expectedShorter.data()[3]);
+
+            static_assert(shorter.changeLength<minLength>('x') == expectedShorter);
+            static_assert(longer.changeLength<minLength>('y') == expectedLonger);
+            static_assert(empty.changeLength<minLength>('z') == expectedEmpty);
         }
 
     }
-}
-
-__declspec(noinline) void test()
-{
-    constexpr StaticString first{"<"};
-    constexpr StaticString second{"hello"};
-    constexpr StaticString third{">"};
-    constexpr StaticString result = first + second + third;
-    puts(result.data());
-}
-
-int main()
-{
-    test();
-    return 0;
 }

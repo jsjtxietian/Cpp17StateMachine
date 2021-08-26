@@ -1,143 +1,10 @@
-#include <tuple>
-#include <variant>
 #include <iostream>
-#include <utility>
+#include <type_traits>
 
-template <typename... Handlers>
-struct Will : Handlers...
-{
-    using Handlers::handle...;
-};
-
-struct Nothing
-{
-    template <typename Machine, typename State, typename Event>
-    void execute(Machine &, State &, const Event &)
-    {
-    }
-};
-
-template <typename Action>
-struct ByDefault
-{
-    template <typename Event>
-    Action handle(const Event &) const
-    {
-        return Action{};
-    }
-};
-
-template <typename... Actions>
-class OneOf
-{
-public:
-    template <typename T>
-    OneOf(T &&arg)
-        : options(std::forward<T>(arg))
-    {
-    }
-
-    template <typename Machine, typename State, typename Event>
-    void execute(Machine &machine, State &state, const Event &event)
-    {
-        std::visit([&machine, &state, &event](auto &action)
-                   { action.execute(machine, state, event); },
-                   options);
-    }
-
-private:
-    std::variant<Actions...> options;
-};
-
-template <typename Action>
-struct Maybe : public OneOf<Action, Nothing>
-{
-    using OneOf<Action, Nothing>::OneOf;
-};
-
-template <typename Event, typename Action>
-struct On
-{
-    Action handle(const Event &) const
-    {
-        return Action{};
-    }
-};
-
-template <typename TargetState>
-class TransitionTo
-{
-public:
-    template <typename Machine, typename State, typename Event>
-    void execute(Machine &machine, State &prevState, const Event &event)
-    {
-        leave(prevState, event);
-        TargetState &newState = machine.template transitionTo<TargetState>();
-        enter(newState, event);
-    }
-
-private:
-    void leave(...)
-    {
-    }
-
-    template <typename State, typename Event>
-    auto leave(State &state, const Event &event) -> decltype(state.onLeave(event))
-    {
-        return state.onLeave(event);
-    }
-
-    void enter(...)
-    {
-    }
-
-    template <typename State, typename Event>
-    auto enter(State &state, const Event &event) -> decltype(state.onEnter(event))
-    {
-        return state.onEnter(event);
-    }
-};
-
-template <typename... States>
-class StateMachine
-{
-public:
-    StateMachine() = default;
-
-    StateMachine(States... states)
-        : states(std::move(states)...)
-    {
-    }
-
-    template <typename State>
-    State &transitionTo()
-    {
-        State &state = std::get<State>(states);
-        currentState = &state;
-        return state;
-    }
-
-    template <typename Event>
-    void handle(const Event &event)
-    {
-        handleBy(event, *this);
-    }
-
-    template <typename Event, typename Machine>
-    void handleBy(const Event &event, Machine &machine)
-    {
-        auto passEventToState = [&machine, &event](auto statePtr)
-        {
-            auto action = statePtr->handle(event);
-            action.execute(machine, *statePtr, event);
-        };
-        std::visit(passEventToState, currentState);
-    }
-
-private:
-    std::tuple<States...> states;
-    std::variant<States *...> currentState{&std::get<0>(states)};
-};
+#include "StateMachine.h"
+#include "StaticString.h"
+#include "Types.h"
+#include "Actions.h"
 
 struct OpenEvent
 {
@@ -191,11 +58,8 @@ public:
     {
         if (e.key == key)
         {
-            std::cout << "Unlock Succeed!" << std::endl;
             return TransitionTo<ClosedState>{};
         }
-        std::cout << "Unlock Failed!" << std::endl;
-
         return Nothing{};
     }
 
@@ -205,12 +69,170 @@ private:
 
 using Door = StateMachine<ClosedState, OpenState, LockedState>;
 
+template <typename T>
+void debug(T &&)
+{
+    std::cout << __PRETTY_FUNCTION__ << std::endl;
+}
+
+#define STRINGIFY_IMPL(TYPE) \
+    [[maybe_unused]] static constexpr auto stringify(Types<TYPE>) { return StaticString{#TYPE}; }
+
+STRINGIFY_IMPL(OpenEvent)
+STRINGIFY_IMPL(CloseEvent)
+STRINGIFY_IMPL(LockEvent)
+STRINGIFY_IMPL(UnlockEvent)
+
+STRINGIFY_IMPL(ClosedState)
+STRINGIFY_IMPL(OpenState)
+STRINGIFY_IMPL(LockedState)
+
+struct Header
+{
+};
+
+struct SimpleStringifier
+{
+    constexpr auto operator()(Types<Header>) const
+    {
+        return StaticString{""};
+    }
+
+    template <typename T>
+    constexpr auto operator()(Types<T> type) const
+    {
+        return stringify(type);
+    }
+};
+
+template <std::size_t Width>
+struct ConstantWidthStringifier
+{
+    constexpr auto operator()(Types<Header>) const
+    {
+        return StaticString{""}.template changeLength<Width>(' ');
+    }
+
+    template <typename T>
+    constexpr auto operator()(Types<T> type) const
+    {
+        return stringify(type).template changeLength<Width>(' ');
+    }
+};
+
+template <typename Stringifier, typename State>
+class GenerateRow
+{
+public:
+    constexpr GenerateRow(Stringifier str, Types<State>)
+        : str(str)
+    {
+    }
+
+    constexpr auto operator()(Types<State> state) const
+    {
+        return str(state);
+    }
+
+    template <typename Event>
+    constexpr auto operator()(Types<Event>) const
+    {
+        auto action = ResolveAction{}(Types<Types<State, Event>>{});
+        return StaticString{" | "} + str(action);
+    }
+
+private:
+    const Stringifier str;
+};
+
+template <typename Stringifier>
+class GenerateRow<Stringifier, Header>
+{
+public:
+    constexpr GenerateRow(Stringifier str, Types<Header>)
+        : str(str)
+    {
+    }
+
+    constexpr auto operator()(Types<Header> header) const
+    {
+        return str(header);
+    }
+
+    template <typename Event>
+    constexpr auto operator()(Types<Event> event) const
+    {
+        return StaticString{" | "} + str(event);
+    }
+
+private:
+    const Stringifier str;
+};
+
+template <typename Stringifier, typename... Events>
+class GenerateTable
+{
+public:
+    constexpr GenerateTable(Stringifier str, Types<Events...>)
+        : str(str)
+    {
+    }
+
+    template <typename State>
+    constexpr auto operator()(Types<State> state) const
+    {
+        return (Types<State, Events...>{} | MapAndJoin{GenerateRow{str, state}}) + StaticString{"\n"};
+    }
+
+private:
+    const Stringifier str;
+};
+
+template <std::size_t X>
+struct Maximum
+{
+    template <std::size_t Y>
+    constexpr auto operator+(Maximum<Y>) const
+    {
+        return Maximum<std::max(X, Y)>{};
+    }
+
+    static constexpr auto value()
+    {
+        return X;
+    }
+};
+
+struct CalculateMaxLength
+{
+    template <typename T>
+    constexpr auto operator()(Types<T> type)
+    {
+        return Maximum<stringify(type).length()>{};
+    }
+};
+
+template <typename... StateTypes, typename... EventTypes>
+constexpr auto generateTransitionTable(Types<StateTypes...> states, Types<EventTypes...> events)
+{
+    constexpr SimpleStringifier stringifier;
+    constexpr auto result = (Types<Header>{} + states) | MapAndJoin{GenerateTable{stringifier, events}};
+    return result;
+}
+
+template <typename... StateTypes, typename... EventTypes>
+constexpr auto generatePrettyTransitionTable(Types<StateTypes...> states, Types<EventTypes...> events)
+{
+    constexpr auto actions = (states * events) | MapAndJoin(ResolveAction{});
+    constexpr auto maxWidth = (states + events + actions) | MapAndJoin(CalculateMaxLength{});
+    constexpr ConstantWidthStringifier<maxWidth.value()> stringifier{};
+    constexpr auto result = (Types<Header>{} + states) | MapAndJoin{GenerateTable{stringifier, events}};
+    return result;
+}
+
 int main()
 {
-    Door door{ClosedState{}, OpenState{}, LockedState{0}};
-
-    door.handle(LockEvent{1234});
-    door.handle(UnlockEvent{2});
-    door.handle(UnlockEvent{1234});
+    std::cout << generateTransitionTable(Door::getStateTypes(), Types<OpenEvent, CloseEvent, LockEvent, UnlockEvent>{}).data() << std::endl;
+    std::cout << generatePrettyTransitionTable(Door::getStateTypes(), Types<OpenEvent, CloseEvent, LockEvent, UnlockEvent>{}).data() << std::endl;
     return 0;
 }
